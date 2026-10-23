@@ -1,6 +1,6 @@
 module github.com/GetStream/stream-backend-homework-assignment
 
-go 1.22.4
+go 1.26.0
 
 require (
 	github.com/google/go-cmp v0.6.0

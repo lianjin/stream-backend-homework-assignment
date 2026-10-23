@@ -93,7 +93,7 @@ func TestPostgres_ListMessages(t *testing.T) {
 				}
 			}
 
-			got, err := pg.ListMessages(ctx)
+			got, err := pg.ListMessages(ctx, 10, api.MessageCursor{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -164,7 +164,9 @@ func connect(t *testing.T) *Postgres {
 		t.Fatalf("Could not connect to PostgreSQL: %v", err)
 	}
 
-	// Truncate the table before each test.
+	if _, err := pg.bun.NewTruncateTable().Model((*reaction)(nil)).Exec(ctx); err != nil {
+		t.Fatalf("Could not truncate reactions: %v", err)
+	}
 	if _, err := pg.bun.NewTruncateTable().Model((*message)(nil)).Exec(ctx); err != nil {
 		t.Fatalf("Could not truncate table: %v", err)
 	}

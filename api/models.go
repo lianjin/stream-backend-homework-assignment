@@ -1,6 +1,11 @@
 package api
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+var ErrMessageNotFound = errors.New("message not found")
 
 // A Message represents a persisted message.
 type Message struct {
@@ -8,6 +13,7 @@ type Message struct {
 	Text      string
 	UserID    string
 	CreatedAt time.Time
+	Reactions []Reaction
 }
 
 // A Reaction represents a reaction to a message such as a like.

@@ -1,122 +1,132 @@
-# Stream Homework assignment
+# Stream Message API
 
-## Introduction
+Homework for Stream's backend interview. The starter was a message REST API with an unimplemented reaction endpoint. This repo completes pagination, reactions, validation, and schema for high read/write load.
 
-### Prerequisites
+## Prerequisites
 
-- You'll need Go 1.22 or newer installed. See https://go.dev/doc/install.
-- Docker for setting up databases.
+- Go 1.22 or newer ([install](https://go.dev/doc/install))
+- Docker (PostgreSQL + Redis)
 
-### Setup
+## Setup
 
-First, start the docker compose setup. This provides a PostgreSQL and Redis
-that we can connect to.
-
-```
+```bash
 docker compose up -d
-```
-
-### Running the API server
-
-We can run the API with `go run`. The flags will by default point to the DBs
-defined in `docker-compose.yml`.
-
-```
 go run ./cmd/api
 ```
 
-This will start listening on port `8080`:
+The server listens on `localhost:8080`. Flags (`go run ./cmd/api -h`) default to the compose services: Postgres `localhost:5432`, Redis `localhost:6379`.
 
+`postgres/schema.sql` is applied only when the Postgres volume is first created. After changing the schema:
+
+```bash
+docker compose down -v && docker compose up -d
 ```
-curl -s localhost:8080
+
+If a local Postgres already binds `5432`, stop it or the app will connect to the wrong instance.
+
+## What was implemented
+
+| Requirement | Approach |
+|---|---|
+| `reactions` table | UUID PK, FK to `messages` with `ON DELETE CASCADE`, `CHECK (score > 0)` |
+| Indexes / uniqueness | `messages.id` PK; `messages(created_at DESC)` for keyset pagination; `UNIQUE (message_id, user_id, type)` (also supports `IN (message_id)` lookups) |
+| `POST .../reactions` | Upsert on that unique key; omitted `score` defaults to 1; missing message → 404 |
+| Pagination | Pages of 10, newest first; cursor is `(created_at, id)` so equal timestamps do not skip/duplicate |
+| List reactions | Each message includes `reaction_count` and `reactions`; loaded from DB in one `IN` query (no reaction cache) |
+| Validation | Cursor format; reaction `user_id` / `type` / positive `score` |
+
+### Pagination and cache
+
+- `GET /messages` with no `cursor`: latest page. Redis holds the latest 10 **message shells**. If Redis has fewer than 10 (cold or partial), the API loads the latest 10 from Postgres and **rebuilds** the cache under a mutex so create and replace cannot interleave. Cache hits do not take that lock.
+- `GET /messages?cursor=...`: Postgres only, `created_at < t OR (created_at = t AND id < id)`, `ORDER BY created_at DESC, id DESC LIMIT 10`.
+- Response `cursor` is the last item encoded as `{RFC3339Nano}|{uuid}`. Empty list → empty cursor.
+
+Create still writes Postgres then Redis (Redis failure is logged; the HTTP create still succeeds).
+
+### Why reactions are not cached
+
+Redis speeds up **which 10 messages are latest**. Reactions are always read from Postgres after that. A 10-id `IN` query on the unique index is cheap; caching reactions would require invalidation on every score upsert, with no perfect consistency. If reaction payloads later dominate latency, a per-message snapshot plus delete-on-write would be the next step—not patching scores inside Redis.
+
+## API
+
+### `GET /messages`
+
+Query: optional `cursor`.
+
+```bash
+curl -s 'localhost:8080/messages'
+curl -s 'localhost:8080/messages?cursor=2024-01-02T00:00:00Z|7c6d956b-58d6-4ac3-9984-f341346edc37'
 ```
 
-_See `go run ./cmd/api -h` for flags_
-
-### Running tests
-
-Unit tests can be run directly with `go test`:
-
+```json
+{
+  "messages": [
+    {
+      "id": "...",
+      "text": "world!",
+      "user_id": "testuser",
+      "created_at": "Fri, 23 Oct 2026 13:00:00 UTC",
+      "reaction_count": 1,
+      "reactions": [
+        {
+          "id": "...",
+          "message_id": "...",
+          "type": "like",
+          "score": 1,
+          "user_id": "testuser",
+          "created_at": "Fri, 23 Oct 2026 13:00:01 UTC"
+        }
+      ]
+    }
+  ],
+  "cursor": "2026-10-23T13:00:00Z|..."
+}
 ```
+
+Invalid cursor → `400`.
+
+### `POST /messages`
+
+```bash
+curl -s -X POST localhost:8080/messages \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"hello","user_id":"testuser"}'
+```
+
+`201` with `id`, `text`, `user_id`, `created_at`.
+
+### `POST /messages/{messageID}/reactions`
+
+Same user + message + type updates `score` and keeps the original reaction id / `created_at`. HTTP status is `201` for both insert and update.
+
+```bash
+curl -s -X POST localhost:8080/messages/$MESSAGE_ID/reactions \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"like","user_id":"testuser"}'
+
+curl -s -X POST localhost:8080/messages/$MESSAGE_ID/reactions \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"like","score":10,"user_id":"testuser"}'
+```
+
+| Case | Status |
+|---|---|
+| Missing `user_id` / `type`, `score < 1` | 400 |
+| Unknown `messageID` | 404 |
+
+## Tests
+
+```bash
 go test ./...
+go test -tags=integration ./...   # wipes compose DB data
+hurl --test e2e.hurl              # API must be running; empty DB
 ```
 
-#### Integration tests
+Postman: import `postman_collection.json` (base URL `http://localhost:8080`). Run **Happy path** in order so `message_id` / `cursor` are captured.
 
-> Note: running integration tests will wipe all existing data in the database.
+## Layout
 
-Integration tests that use real databases are opt-in. This is partially so that
-tests can be run without Docker, but also because the tests will remove all
-existing data from the DB. If the docker-compose stack is up, we can opt into
-integration tests with the `-integration` tag:
-
-```
-go test -tags=integration ./...
-```
-
-The tests will point to the same databases in docker compose.
-
-#### End-To-End tests
-
-A small [Hurl] script allows simulating real requests to the API. 
-
-> The test assumes an empty starting point, so you may need to restart the
-> docker compose stack if data was previously inserted.
-
-With Hurl installed and the API running, we can run these tests:
-
-```
-hurl --test e2e.hurl
-```
-
-## Assignment
-
-This homework assignment is part of the interview process (for backend engineers) at Stream (btw we're [hiring](https://getstream.io/team/#jobs)). It is a simplified version of the real-world problems we solve every day.
-For this assignment we will provide you with a simple message (REST) API. The goal of the assigment is for you to add missing functionality.
-
-The way the API is currently implemented, it's possible to create messages and retrieve a list of messages. We have also included an endpoint to add a reaction to a message. However, this endpoint is not implemented yet.
-
-A message consists of the following fields:
-* `ID` - a unique identifier for the message
-* `Text` - the content of the message
-* `UserID` - the user who created the message
-* `CreatedAt` - the timestamp when the message was created
-
-The API has three endpoints:
-* `GET /messages` - returns a list of messages
-* `POST /messages` - creates a new message
-* `POST /messages/{messageID}/reactions` - adds a reaction to a message
-
-When a message is created (`POST /messages`), the message is inserted into the database (`messages` table). The message is also added to the message cache (Redis). The message cache is used to store the latest 10 messages. When a message is added to the cache, the oldest message is removed if the cache is full (ie. contains a maximum of 10 messages).
-When a list of messages is retrieved (`GET /messages`), the application first tries to fetch the messages from the message cache. If the cache does not contain the requested messages, the application fetches the messages from the database.
-
-Your task is to implement the missing functionality. These are the things we would like you to do:
-1. Create the database schema for the `reactions` table (`postgres/schema.sql`).
-2. We assume this API will be heavily used and therefor needs to support lots of read and write operations to the database. Update the schema accordingly.
-3. Implement the `POST /messages/{messageID}/reactions` endpoint. A reaction consists of the following fields:
-    * `ID` - a unique identifier for the reaction
-    * `MessageID` - the message to which the reaction is added
-    * `UserID` - the user who added the reaction
-    * `Type` - the type of the reaction (eg. like, love, laugh, etc.)
-    * `Score` - the score of the reaction (eg. 1, 2, 10, etc.) If no score is provided, the default score is 1. You can think of the score as claps on Medium.com.
-    * `CreatedAt` - the timestamp when the reaction was added.
-4. Extend the list messages endpoint (`GET /messages`) to allow for pagination. The endpoint currently tries to fetch all messages. Long term this is not scalable, therefore we would like to be able to fetch messages in pages of 10 messages. For example, the first page should return the latest 10 messages, the second page should return messages the next 10, etc.
-5. Extend the list messages endpoint (`GET /messages`) to include the total reaction count as well as a list of reactions for each message.
-6. The endpoints currently don't validate the input. Please add input validation to the endpoints.
-
-We expect a certain level of seniority. Therefor we don't want to explicitly mention every detail you should think about. Think about this assignment as a real-world problem you need to solve. We expect you to make the necessary decisions to make the application (almost) production ready.
-
-### Deliverables
-Please fork this repository and implement the missing functionality. An experienced engineer would most likely be able to complete the assignment in a few hours. When you are done, please send us a link to your repository.
-We will schedule a follow-up call to discuss your solution.
-
-### Bonus points
-The following things are not part of the assignment, but if you feel like making the application production ready, you could do something with the following topics:
-* Improve robustness with graceful degradation when databases are down
-* Observability
-
-### Reading materials
-* [Stream's 10 week onboarding program](https://stream-wiki.notion.site/Stream-Go-10-Week-Backend-Eng-Onboarding-625363c8c3684753b7f2b7d829bcd67a)
-
-
-[Hurl]: https://hurl.dev/
+- `cmd/api` — process, Postgres/Redis connect
+- `api` — HTTP, pagination, validation, cache orchestration
+- `postgres` — SQL via bun
+- `redis` — latest-10 message cache (ZSET index + per-message hashes)

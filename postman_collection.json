@@ -1,0 +1,363 @@
+{
+  "info": {
+    "name": "Stream Message API",
+    "description": "Local API at http://localhost:8080. Start with: docker compose up -d && go run ./cmd/api\nRun the Happy path folder in order so message_id / cursor are captured.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "user_id", "value": "testuser" },
+    { "key": "message_id", "value": "" },
+    { "key": "cursor", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Happy path",
+      "item": [
+        {
+          "name": "List messages",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('has messages array', () => pm.expect(body.messages).to.be.an('array'));",
+                  "pm.test('has cursor', () => pm.expect(body).to.have.property('cursor'));",
+                  "if (body.messages.length > 0) {",
+                  "  pm.collectionVariables.set('message_id', body.messages[0].id);",
+                  "  pm.collectionVariables.set('cursor', body.cursor);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create message hello",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"hello\",\n  \"user_id\": \"{{user_id}}\"\n}"
+            },
+            "url": "{{baseUrl}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('has id', () => pm.expect(body.id).to.be.a('string').and.not.empty);",
+                  "pm.collectionVariables.set('message_id', body.id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create message world",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"text\": \"world!\",\n  \"user_id\": \"{{user_id}}\"\n}"
+            },
+            "url": "{{baseUrl}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.collectionVariables.set('message_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List messages after create",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('at least 2 messages', () => pm.expect(body.messages.length).to.be.at.least(2));",
+                  "pm.test('newest first is world!', () => pm.expect(body.messages[0].text).to.eql('world!'));",
+                  "pm.test('has reaction fields', () => {",
+                  "  pm.expect(body.messages[0]).to.have.property('reaction_count');",
+                  "  pm.expect(body.messages[0].reactions).to.be.an('array');",
+                  "});",
+                  "pm.collectionVariables.set('message_id', body.messages[0].id);",
+                  "pm.collectionVariables.set('cursor', body.cursor);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create reaction like",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"like\",\n  \"user_id\": \"{{user_id}}\"\n}"
+            },
+            "url": "{{baseUrl}}/messages/{{message_id}}/reactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('type like', () => pm.expect(body.type).to.eql('like'));",
+                  "pm.test('default score 1', () => pm.expect(body.score).to.eql(1));",
+                  "pm.test('message_id matches', () => pm.expect(body.message_id).to.eql(pm.collectionVariables.get('message_id')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update reaction score",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"like\",\n  \"score\": 10,\n  \"user_id\": \"{{user_id}}\"\n}"
+            },
+            "url": "{{baseUrl}}/messages/{{message_id}}/reactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('score updated', () => pm.expect(pm.response.json().score).to.eql(10));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List messages with reactions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const msg = pm.response.json().messages[0];",
+                  "pm.test('reaction_count >= 1', () => pm.expect(msg.reaction_count).to.be.at.least(1));",
+                  "pm.test('reactions not empty', () => pm.expect(msg.reactions.length).to.be.at.least(1));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List messages next page",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/messages?cursor={{cursor}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["messages"],
+              "query": [{ "key": "cursor", "value": "{{cursor}}" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('has messages', () => pm.expect(pm.response.json().messages).to.be.an('array'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Errors",
+      "item": [
+        {
+          "name": "Invalid cursor",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/messages?cursor=not-a-cursor"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('invalid cursor', () => pm.expect(pm.response.json().error).to.eql('Invalid cursor'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create message invalid json",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "not json" },
+            "url": "{{baseUrl}}/messages"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create reaction missing user_id",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"like\"\n}"
+            },
+            "url": "{{baseUrl}}/messages/{{message_id}}/reactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('user_id required', () => pm.expect(pm.response.json().error).to.eql('user_id is required'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create reaction missing type",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"user_id\": \"{{user_id}}\"\n}"
+            },
+            "url": "{{baseUrl}}/messages/{{message_id}}/reactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('type required', () => pm.expect(pm.response.json().error).to.eql('type is required'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create reaction invalid score",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"like\",\n  \"score\": 0,\n  \"user_id\": \"{{user_id}}\"\n}"
+            },
+            "url": "{{baseUrl}}/messages/{{message_id}}/reactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('score error', () => pm.expect(pm.response.json().error).to.eql('score must be a positive integer'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create reaction message not found",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"type\": \"like\",\n  \"user_id\": \"{{user_id}}\"\n}"
+            },
+            "url": "{{baseUrl}}/messages/00000000-0000-0000-0000-000000000000/reactions"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('not found', () => pm.expect(pm.response.json().error).to.eql('Message not found'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

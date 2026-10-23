@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -17,13 +18,41 @@ import (
 )
 
 func TestAPI_listMessages(t *testing.T) {
+	msg1 := Message{
+		ID:        "1",
+		Text:      "Hello",
+		UserID:    "testuser",
+		CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	msg2 := Message{
+		ID:        "2",
+		Text:      "World",
+		UserID:    "testuser",
+		CreatedAt: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC),
+	}
+
 	tests := []struct {
 		name       string
+		url        string
 		db         *testdb
 		cache      *testcache
 		wantStatus int
 		wantBody   string
 	}{
+		{
+			name: "InvalidCursor",
+			url:  "/messages?cursor=not-a-cursor",
+			cache: &testcache{
+				listMessages: func(t *testing.T) ([]Message, error) {
+					t.Fatal("cache should not be called")
+					return nil, nil
+				},
+			},
+			wantStatus: 400,
+			wantBody: `{
+				"error": "Invalid cursor"
+			}`,
+		},
 		{
 			name: "DBError",
 			cache: &testcache{
@@ -32,7 +61,7 @@ func TestAPI_listMessages(t *testing.T) {
 				},
 			},
 			db: &testdb{
-				listMessages: func(t *testing.T, excludeMsgIDs ...string) ([]Message, error) {
+				listMessages: func(t *testing.T, limit int, cursor MessageCursor) ([]Message, error) {
 					return nil, errors.New("something went wrong")
 				},
 			},
@@ -42,20 +71,39 @@ func TestAPI_listMessages(t *testing.T) {
 			}`,
 		},
 		{
-			name: "CacheError",
+			name: "CacheErrorFallbackDB",
 			cache: &testcache{
 				listMessages: func(t *testing.T) ([]Message, error) {
 					return nil, errors.New("something went wrong")
 				},
-			},
-			db: &testdb{
-				listMessages: func(t *testing.T, excludeMsgIDs ...string) ([]Message, error) {
-					return nil, nil
+				replaceMessages: func(t *testing.T, msgs []Message) error {
+					if len(msgs) != 1 || msgs[0].ID != "1" {
+						t.Fatalf("unexpected replace %v", msgs)
+					}
+					return nil
 				},
 			},
-			wantStatus: 500,
+			db: &testdb{
+				listMessages: func(t *testing.T, limit int, cursor MessageCursor) ([]Message, error) {
+					if !cursor.IsZero() {
+						t.Fatal("expected first-page cursor")
+					}
+					return []Message{msg1}, nil
+				},
+			},
+			wantStatus: 200,
 			wantBody: `{
-				"error": "Could not list messages"
+				"messages": [
+					{
+						"id": "1",
+						"text": "Hello",
+						"user_id": "testuser",
+						"created_at": "Mon, 01 Jan 2024 00:00:00 UTC",
+						"reaction_count": 0,
+						"reactions": []
+					}
+				],
+				"cursor": "` + MessageCursor{CreatedAt: msg1.CreatedAt, ID: msg1.ID}.String() + `"
 			}`,
 		},
 		{
@@ -64,123 +112,117 @@ func TestAPI_listMessages(t *testing.T) {
 				listMessages: func(t *testing.T) ([]Message, error) {
 					return nil, nil
 				},
-			},
-			db: &testdb{
-				listMessages: func(t *testing.T, excludeMsgIDs ...string) ([]Message, error) {
-					return nil, nil
-				},
-			},
-			wantStatus: 200,
-			wantBody: `{
-				"messages": []
-			}`,
-		},
-		{
-			name: "Cache",
-			cache: &testcache{
-				listMessages: func(t *testing.T) ([]Message, error) {
-					return []Message{
-						{
-							ID:        "1",
-							Text:      "Hello",
-							UserID:    "testuser",
-							CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-						},
-					}, nil
-				},
-			},
-			db: &testdb{
-				listMessages: func(t *testing.T, excludeMsgIDs ...string) ([]Message, error) {
-					// Nothing in DB.
-					return nil, nil
-				},
-			},
-			wantStatus: 200,
-			wantBody: `{
-				"messages": [
-					{
-						"id": "1",
-						"text": "Hello",
-						"user_id": "testuser",
-						"created_at": "Mon, 01 Jan 2024 00:00:00 UTC"
+				replaceMessages: func(t *testing.T, msgs []Message) error {
+					if len(msgs) != 0 {
+						t.Fatalf("unexpected replace %v", msgs)
 					}
-				]
-			}`,
-		},
-		{
-			name: "DB",
-			cache: &testcache{
-				listMessages: func(t *testing.T) ([]Message, error) {
-					// Nothing in cache.
+					return nil
+				},
+			},
+			db: &testdb{
+				listMessages: func(t *testing.T, limit int, cursor MessageCursor) ([]Message, error) {
 					return nil, nil
 				},
 			},
-			db: &testdb{
-				listMessages: func(t *testing.T, excludeMsgIDs ...string) ([]Message, error) {
-					return []Message{
-						{
-							ID:        "1",
-							Text:      "Hello",
-							UserID:    "testuser",
-							CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-						},
-					}, nil
-				},
-			},
 			wantStatus: 200,
 			wantBody: `{
-				"messages": [
-					{
-						"id": "1",
-						"text": "Hello",
-						"user_id": "testuser",
-						"created_at": "Mon, 01 Jan 2024 00:00:00 UTC"
-					}
-				]
+				"messages": [],
+				"cursor": ""
 			}`,
 		},
 		{
-			name: "Mixed",
+			name: "CacheIncompleteRefreshDB",
 			cache: &testcache{
 				listMessages: func(t *testing.T) ([]Message, error) {
-					return []Message{
-						{
-							ID:        "1",
-							Text:      "Hello",
-							UserID:    "testuser",
-							CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-						},
-					}, nil
+					return []Message{msg1}, nil
+				},
+				replaceMessages: func(t *testing.T, msgs []Message) error {
+					if len(msgs) != 2 {
+						t.Fatalf("got %d messages, want 2", len(msgs))
+					}
+					return nil
 				},
 			},
 			db: &testdb{
-				listMessages: func(t *testing.T, excludeMsgIDs ...string) ([]Message, error) {
-					return []Message{
-						{
-							ID:        "2",
-							Text:      "World",
-							UserID:    "testuser",
-							CreatedAt: time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC),
-						},
-					}, nil
+				listMessages: func(t *testing.T, limit int, cursor MessageCursor) ([]Message, error) {
+					if limit != messagePageSize {
+						t.Errorf("limit=%d, want %d", limit, messagePageSize)
+					}
+					if !cursor.IsZero() {
+						t.Fatal("expected first-page cursor")
+					}
+					return []Message{msg2, msg1}, nil
 				},
 			},
 			wantStatus: 200,
 			wantBody: `{
 				"messages": [
-					{
-						"id": "1",
-						"text": "Hello",
-						"user_id": "testuser",
-						"created_at": "Mon, 01 Jan 2024 00:00:00 UTC"
-					},
 					{
 						"id": "2",
 						"text": "World",
 						"user_id": "testuser",
-						"created_at": "Tue, 02 Jan 2024 00:00:00 UTC"
+						"created_at": "Tue, 02 Jan 2024 00:00:00 UTC",
+						"reaction_count": 0,
+						"reactions": []
+					},
+					{
+						"id": "1",
+						"text": "Hello",
+						"user_id": "testuser",
+						"created_at": "Mon, 01 Jan 2024 00:00:00 UTC",
+						"reaction_count": 0,
+						"reactions": []
 					}
-				]
+				],
+				"cursor": "` + MessageCursor{CreatedAt: msg1.CreatedAt, ID: msg1.ID}.String() + `"
+			}`,
+		},
+		{
+			name: "CacheFull",
+			cache: &testcache{
+				listMessages: func(t *testing.T) ([]Message, error) {
+					return fullCachePage(), nil
+				},
+			},
+			db: &testdb{
+				listMessages: func(t *testing.T, limit int, cursor MessageCursor) ([]Message, error) {
+					t.Fatal("list messages should not be called when cache is full")
+					return nil, nil
+				},
+			},
+			wantStatus: 200,
+			wantBody: fullCachePageBody(),
+		},
+		{
+			name: "WithCursor",
+			url:  "/messages?cursor=" + url.QueryEscape(MessageCursor{CreatedAt: msg2.CreatedAt, ID: msg2.ID}.String()),
+			cache: &testcache{
+				listMessages: func(t *testing.T) ([]Message, error) {
+					t.Fatal("cache should not be called when cursor is set")
+					return nil, nil
+				},
+			},
+			db: &testdb{
+				listMessages: func(t *testing.T, limit int, cursor MessageCursor) ([]Message, error) {
+					if cursor.ID != msg2.ID {
+						t.Errorf("cursor ID=%q, want %q", cursor.ID, msg2.ID)
+					}
+					return []Message{msg1}, nil
+				},
+			},
+			wantStatus: 200,
+			wantBody: `{
+				"messages": [
+					{
+						"id": "1",
+						"text": "Hello",
+						"user_id": "testuser",
+						"created_at": "Mon, 01 Jan 2024 00:00:00 UTC",
+						"reaction_count": 0,
+						"reactions": []
+					}
+				],
+				"cursor": "` + MessageCursor{CreatedAt: msg1.CreatedAt, ID: msg1.ID}.String() + `"
 			}`,
 		},
 	}
@@ -202,7 +244,11 @@ func TestAPI_listMessages(t *testing.T) {
 			srv := httptest.NewServer(api)
 			defer srv.Close()
 
-			req, _ := http.NewRequest("GET", srv.URL+"/messages", nil)
+			path := tt.url
+			if path == "" {
+				path = "/messages"
+			}
+			req, _ := http.NewRequest("GET", srv.URL+path, nil)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -211,6 +257,33 @@ func TestAPI_listMessages(t *testing.T) {
 			checkBody(t, resp, tt.wantBody)
 		})
 	}
+}
+
+func fullCachePage() []Message {
+	out := make([]Message, messagePageSize)
+	for i := 0; i < messagePageSize; i++ {
+		out[i] = Message{
+			ID:        string(rune('a' + i)),
+			Text:      "Hello",
+			UserID:    "testuser",
+			CreatedAt: time.Date(2024, 1, 10-i, 0, 0, 0, 0, time.UTC),
+		}
+	}
+	return out
+}
+
+func fullCachePageBody() string {
+	msgs := fullCachePage()
+	var b strings.Builder
+	b.WriteString(`{"messages":[`)
+	for i, msg := range msgs {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(`{"id":"` + msg.ID + `","text":"Hello","user_id":"testuser","created_at":"` + msg.CreatedAt.Format(time.RFC1123) + `","reaction_count":0,"reactions":[]}`)
+	}
+	b.WriteString(`],"cursor":"` + cursorFromMessages(msgs) + `"}`)
+	return b.String()
 }
 
 func TestAPI_createMessage(t *testing.T) {
@@ -371,8 +444,11 @@ func TestAPI_createReaction(t *testing.T) {
 					if reaction.UserID != "test" {
 						t.Errorf("Got UserID %q, want test", reaction.UserID)
 					}
-					if reaction.Type != "thumbsup" {
-						t.Errorf("Got Text %q, want test", reaction.Type)
+					if reaction.Type != "thumbs_up" {
+						t.Errorf("Got Type %q, want thumbs_up", reaction.Type)
+					}
+					if reaction.Score != 1 {
+						t.Errorf("Got Score %d, want 1", reaction.Score)
 					}
 					return Reaction{
 						ID:        "1",
@@ -389,8 +465,32 @@ func TestAPI_createReaction(t *testing.T) {
 				"id": "1",
 				"message_id": "12345",
 				"type": "thumbs_up",
+				"score": 1,
 				"user_id": "test",
 				"created_at": "Mon, 01 Jan 2024 00:00:00 UTC"
+			}`,
+		},
+		{
+			name:      "MissingUserID",
+			messageID: "12345",
+			req:       `{"type":"like"}`,
+			wantStatus: 400,
+			wantBody: `{
+				"error": "user_id is required"
+			}`,
+		},
+		{
+			name:      "MessageNotFound",
+			messageID: "12345",
+			req:       `{"type":"like","user_id":"test"}`,
+			db: &testdb{
+				messageExists: func(t *testing.T, messageID string) (bool, error) {
+					return false, nil
+				},
+			},
+			wantStatus: 404,
+			wantBody: `{
+				"error": "Message not found"
 			}`,
 		},
 	}
@@ -422,13 +522,15 @@ func TestAPI_createReaction(t *testing.T) {
 
 type testdb struct {
 	T              *testing.T
-	listMessages   func(t *testing.T, excludeMsgIDs ...string) ([]Message, error)
+	listMessages   func(t *testing.T, limit int, cursor MessageCursor) ([]Message, error)
 	insertMessage  func(t *testing.T, msg Message) (Message, error)
 	insertReaction func(t *testing.T, reaction Reaction) (Reaction, error)
+	listReactions  func(t *testing.T, messageIDs []string) ([]Reaction, error)
+	messageExists  func(t *testing.T, messageID string) (bool, error)
 }
 
-func (db *testdb) ListMessages(_ context.Context, excludeMsgIDs ...string) ([]Message, error) {
-	return db.listMessages(db.T, excludeMsgIDs...)
+func (db *testdb) ListMessages(_ context.Context, limit int, cursor MessageCursor) ([]Message, error) {
+	return db.listMessages(db.T, limit, cursor)
 }
 
 func (db *testdb) InsertMessage(_ context.Context, msg Message) (Message, error) {
@@ -439,10 +541,25 @@ func (db *testdb) InsertReaction(_ context.Context, reaction Reaction) (Reaction
 	return db.insertReaction(db.T, reaction)
 }
 
+func (db *testdb) MessageExists(_ context.Context, messageID string) (bool, error) {
+	if db.messageExists == nil {
+		return true, nil
+	}
+	return db.messageExists(db.T, messageID)
+}
+
+func (db *testdb) ListReactions(_ context.Context, messageIDs []string) ([]Reaction, error) {
+	if db.listReactions == nil {
+		return nil, nil
+	}
+	return db.listReactions(db.T, messageIDs)
+}
+
 type testcache struct {
-	T             *testing.T
-	listMessages  func(t *testing.T) ([]Message, error)
-	insertMessage func(t *testing.T, msg Message) error
+	T               *testing.T
+	listMessages    func(t *testing.T) ([]Message, error)
+	insertMessage   func(t *testing.T, msg Message) error
+	replaceMessages func(t *testing.T, msgs []Message) error
 }
 
 func (c *testcache) ListMessages(_ context.Context) ([]Message, error) {
@@ -451,6 +568,13 @@ func (c *testcache) ListMessages(_ context.Context) ([]Message, error) {
 
 func (c *testcache) InsertMessage(_ context.Context, msg Message) error {
 	return c.insertMessage(c.T, msg)
+}
+
+func (c *testcache) ReplaceMessages(_ context.Context, msgs []Message) error {
+	if c.replaceMessages == nil {
+		return nil
+	}
+	return c.replaceMessages(c.T, msgs)
 }
 
 func checkStatus(t *testing.T, got, want int) {

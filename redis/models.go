@@ -22,3 +22,12 @@ func (m message) APIMessage() api.Message {
 		CreatedAt: m.CreatedAt,
 	}
 }
+
+func fromAPIMessage(msg api.Message) message {
+	return message{
+		ID:        msg.ID,
+		Text:      msg.Text,
+		UserID:    msg.UserID,
+		CreatedAt: msg.CreatedAt,
+	}
+}

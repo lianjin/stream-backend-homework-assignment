@@ -29,15 +29,17 @@ func Connect(ctx context.Context, connStr string) (*Postgres, error) {
 	}, nil
 }
 
-// ListMessages returns all messages in the database.
-func (pg *Postgres) ListMessages(ctx context.Context, excludeMsgIDs ...string) ([]api.Message, error) {
+// ListMessages returns messages ordered by created_at DESC, id DESC.
+func (pg *Postgres) ListMessages(ctx context.Context, limit int, cursor api.MessageCursor) ([]api.Message, error) {
 	var msgs []message
 	q := pg.bun.NewSelect().
 		Model(&msgs).
-		Order("created_at DESC")
+		OrderExpr("created_at DESC, id DESC").
+		Limit(limit)
 
-	if len(excludeMsgIDs) > 0 {
-		q = q.Where("id NOT IN (?)", bun.In(excludeMsgIDs))
+	if !cursor.IsZero() {
+		q = q.Where("created_at < ? OR (created_at = ? AND id < ?)",
+			cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
 	}
 	if err := q.Scan(ctx); err != nil {
 		return nil, fmt.Errorf("scan: %w", err)
@@ -62,6 +64,50 @@ func (pg *Postgres) InsertMessage(ctx context.Context, msg api.Message) (api.Mes
 	return m.APIMessage(), nil
 }
 
-func (pg *Postgres) InsertReaction(ctx context.Context, reaction api.Reaction) (api.Reaction, error) {
-	panic("not implemented")
+func (pg *Postgres) MessageExists(ctx context.Context, messageID string) (bool, error) {
+	exists, err := pg.bun.NewSelect().
+		Model((*message)(nil)).
+		Where("id = ?", messageID).
+		Exists(ctx)
+	if err != nil {
+		return false, fmt.Errorf("check message: %w", err)
+	}
+	return exists, nil
+}
+
+func (pg *Postgres) InsertReaction(ctx context.Context, in api.Reaction) (api.Reaction, error) {
+	m := &reaction{
+		MessageID: in.MessageID,
+		Type:      in.Type,
+		Score:     in.Score,
+		UserID:    in.UserID,
+	}
+	_, err := pg.bun.NewInsert().
+		Model(m).
+		On("CONFLICT (message_id, user_id, type) DO UPDATE").
+		Set("score = EXCLUDED.score").
+		Returning("*").
+		Exec(ctx)
+	if err != nil {
+		return api.Reaction{}, fmt.Errorf("upsert reaction: %w", err)
+	}
+	return m.APIReaction(), nil
+}
+
+func (pg *Postgres) ListReactions(ctx context.Context, messageIDs []string) ([]api.Reaction, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+	var rows []reaction
+	if err := pg.bun.NewSelect().
+		Model(&rows).
+		Where("message_id IN (?)", bun.In(messageIDs)).
+		Scan(ctx); err != nil {
+		return nil, fmt.Errorf("scan reactions: %w", err)
+	}
+	out := make([]api.Reaction, len(rows))
+	for i, row := range rows {
+		out[i] = row.APIReaction()
+	}
+	return out, nil
 }
